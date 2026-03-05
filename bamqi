@@ -1,0 +1,242 @@
+-- ==============================
+-- SETTINGS
+-- ==============================
+local TP_SPEED = 200 
+local CROSSHAIR_RADIUS = 100
+local LAVENDER_RADIUS = 100
+local WAIT_AFTER_TP = 0.3
+
+local CH_PER_LAVENDER = 3    
+local POST_COMBO_WAIT = 5    
+local GIVE_UP_TIME = 5 
+
+local SAFE_ZONE_POS = Vector3.new(91.9936905, 32.8035164, 551.02533)
+local SAFE_ZONE_RADIUS = 100
+
+-- ==============================
+-- VARIABLES
+-- ==============================
+getgenv().ComboEnabled = true
+
+local allowedCrosshair = 0 
+local comboPhase = "LAVENDER" 
+local isWaiting = false
+local lastCrosshairFound = os.time()
+local currentTween = nil
+
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+local workspace = game:GetService("Workspace")
+
+local function getHRP()
+    return player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+end
+
+-- ==============================
+-- TOGGLE FUNCTION
+-- ==============================
+local function toggleCombo()
+    getgenv().ComboEnabled = not getgenv().ComboEnabled
+
+    if not getgenv().ComboEnabled then
+        print("🔴 Combo OFF")
+        allowedCrosshair = 0
+        comboPhase = "LAVENDER"
+        isWaiting = false
+        
+        if currentTween then
+            currentTween:Cancel()
+            currentTween = nil
+        end
+    else
+        print("🟢 Combo ON")
+    end
+end
+
+-- ==============================
+-- CACHE SYSTEM
+-- ==============================
+local crosshairCache = {}
+local collected = {}
+local collectedLavender = {}
+
+local function updateCache()
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v.Name == "Crosshair" and v:IsA("BasePart") then
+            crosshairCache[v] = true
+        end
+    end
+end
+
+workspace.DescendantAdded:Connect(function(v) 
+    if v.Name == "Crosshair" then 
+        crosshairCache[v] = true 
+    end 
+end)
+
+workspace.DescendantRemoving:Connect(function(v) 
+    crosshairCache[v] = nil 
+    collected[v] = nil
+    collectedLavender[v] = nil 
+end)
+
+updateCache()
+
+-- ==============================
+-- TWEEN ENGINE
+-- ==============================
+local function smoothTP(targetCFrame)
+    local hrp = getHRP()
+    if not hrp then return end
+    if getgenv().IsTweening then return end
+    if not getgenv().ComboEnabled then return end
+
+    local distance = (hrp.Position - targetCFrame.Position).Magnitude
+    if distance < 2 then return end
+
+    hrp.Velocity = Vector3.zero
+    hrp.RotVelocity = Vector3.zero
+
+    local info = TweenInfo.new(distance / TP_SPEED, Enum.EasingStyle.Linear)
+    currentTween = TweenService:Create(hrp, info, {
+        CFrame = targetCFrame * CFrame.new(0, 2.5, 0)
+    })
+    
+    currentTween:Play()
+
+    while currentTween and currentTween.PlaybackState == Enum.PlaybackState.Playing do
+        if not getgenv().ComboEnabled or getgenv().IsTweening then
+            currentTween:Cancel()
+            currentTween = nil
+            return
+        end
+        task.wait()
+    end
+
+    currentTween = nil
+    task.wait(WAIT_AFTER_TP)
+end
+
+-- ==============================
+-- MAIN LOOP
+-- ==============================
+task.spawn(function()
+    print("🛡️ Combo System Running")
+
+    while true do
+        task.wait(0.1)
+
+        if not getgenv().ComboEnabled then continue end
+        if getgenv().IsTweening or isWaiting then continue end
+
+        local hrp = getHRP()
+        if not hrp then continue end
+
+        if (hrp.Position - SAFE_ZONE_POS).Magnitude <= SAFE_ZONE_RADIUS then
+            continue
+        end
+
+        if comboPhase == "CROSSHAIR" and (os.time() - lastCrosshairFound > GIVE_UP_TIME) then
+            print("⏳ Không đủ Crosshair → quay lại Lavender")
+            comboPhase = "LAVENDER"
+            allowedCrosshair = 0
+        end
+
+        local target = nil
+
+        -- ===== LAVENDER =====
+        if comboPhase == "LAVENDER" then
+            local collectibles = workspace:FindFirstChild("Collectibles")
+            if collectibles then
+                local bestDist = LAVENDER_RADIUS
+                for _, v in ipairs(collectibles:GetChildren()) do
+                    if v:IsA("BasePart")
+                    and v.BrickColor.Name == "Lavender"
+                    and not collectedLavender[v]
+                    and v.Parent then
+                        
+                        local dist = (hrp.Position - v.Position).Magnitude
+                        if dist <= bestDist then
+                            bestDist = dist
+                            target = {part = v, type = "Lavender"}
+                        end
+                    end
+                end
+            end
+
+        -- ===== CROSSHAIR =====
+        elseif comboPhase == "CROSSHAIR" then
+            local bestDist = CROSSHAIR_RADIUS
+            for obj in pairs(crosshairCache) do
+                if obj and obj.Parent and not collected[obj] then
+                    local dist = (hrp.Position - obj.Position).Magnitude
+                    if dist <= bestDist then
+                        bestDist = dist
+                        target = {part = obj, type = "Crosshair"}
+                    end
+                end
+            end
+        end
+
+        -- ===== EXECUTE =====
+        if target then
+            if target.type == "Lavender" then
+                collectedLavender[target.part] = true
+                smoothTP(target.part.CFrame)
+
+                allowedCrosshair = CH_PER_LAVENDER
+                comboPhase = "CROSSHAIR"
+                lastCrosshairFound = os.time()
+
+            elseif target.type == "Crosshair" then
+                collected[target.part] = true
+                allowedCrosshair -= 1
+                lastCrosshairFound = os.time()
+
+                smoothTP(target.part.CFrame)
+
+                if allowedCrosshair <= 0 then
+                    print("✅ Combo Done → nghỉ "..POST_COMBO_WAIT.."s")
+                    isWaiting = true
+                    comboPhase = "LAVENDER"
+
+                    task.delay(POST_COMBO_WAIT, function()
+                        isWaiting = false
+                    end)
+                end
+            end
+        end
+    end
+end)
+
+-- ==============================
+-- UI BUTTON
+-- ==============================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Parent = game.CoreGui
+ScreenGui.Name = "ComboToggleUI"
+
+local Button = Instance.new("TextButton")
+Button.Parent = ScreenGui
+Button.Size = UDim2.new(0, 150, 0, 50)
+Button.Position = UDim2.new(0, 20, 0, 200)
+Button.Text = "Combo: ON"
+Button.BackgroundColor3 = Color3.fromRGB(40,170,40)
+Button.TextColor3 = Color3.new(1,1,1)
+Button.TextScaled = true
+Button.BorderSizePixel = 0
+Button.Active = true
+Button.Draggable = true
+
+Button.MouseButton1Click:Connect(function()
+    toggleCombo()
+
+    if getgenv().ComboEnabled then
+        Button.Text = "Combo: ON"
+        Button.BackgroundColor3 = Color3.fromRGB(40,170,40)
+    else
+        Button.Text = "Combo: OFF"
+        Button.BackgroundColor3 = Color3.fromRGB(170,40,40)
+    end
+end)
